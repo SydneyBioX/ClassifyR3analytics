@@ -1,0 +1,207 @@
+---
+title: "ClassifyR 3 Figures and Results"
+author: "Dario Strbenac"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+The data set which will be used is the METABRIC breast cancer data set. Imaging mass cytometry is a spatial technique which measures about 40 proteins. There is also RNA-seq data which more broadly measures the transcriptome. The dataset is stored on Albona server. Import the omics data. The first five columns contain metadata.
+
+## Global Settings
+
+Plot style.
+
+```{r}
+library(ggplot2)
+theme_set(theme_bw() + theme(axis.text = element_text(colour = "black"), plot.title = element_text(hjust = 0.5)))
+```
+
+Code and result text width.
+
+```{r}
+options(width = 140)
+```
+
+## Data Import
+
+Imaging mass cytometry.
+
+```{r, include = FALSE}
+library(SingleCellExperiment)
+```
+
+```{r}
+datasetFolder <- "/dski/nobackup/biostat/datasets/spatial/IMC_BreastCancer_metabric_Ali2020"
+IMC <- read.csv(file.path(datasetFolder, "Data", "single_cell_data.csv"))
+IMC <- SingleCellExperiment(colData = DataFrame(IMC[, -(6:43)]),
+                            assays = list(counts = t(IMC[, 6:43]))
+                           )
+IMC
+```
+
+The data is in a SingleCellExperiment and has 38 proteins and 479844 cells.
+
+Import the gene expression microarrays.
+
+```{r}
+RNAarrays <- read.delim(file.path(datasetFolder, "Data", "brca_metabric",
+                        "data_mrna_agilent_microarray_zscores_ref_all_samples.txt"),
+                        check.names = FALSE)
+RNAarrays[1:5, 1:5]
+RNAarrays <- RNAarrays[!duplicated(RNAarrays[, "Hugo_Symbol"]), ]
+rownames(RNAarrays) <- RNAarrays[, "Hugo_Symbol"]
+RNAarrays <- RNAarrays[, -(1:2)]
+RNAarrays <- t(RNAarrays)
+RNAarrays[1:5, 1:5]
+```
+
+There has also been updated clinical data made available for METABRIC patients with longer follow-up times. Import the data and derive the recurrence-free survival variable.
+
+```{r}
+clinical <- read.delim(file.path(datasetFolder, "Data", "NIHMS1520488-supplement-Supp_Table_5.txt"),
+                       check.names = FALSE)
+clinical$metabricId <- clinical$METABRIC.ID # Column name identical for joining to omics data.
+clinical$timeRFS <- apply(clinical[, c("T", "TLR", "TDR")], 1, min)
+clinical$eventRFS <- apply(clinical[, c("DeathBreast", "LR", "DR")], 1, max)
+rownames(clinical) <- clinical[, "METABRIC.ID"]
+usefulFeatures <- c("Breast.Tumour.Laterality", "ER.Status", "Inferred.Menopausal.State",
+                    "Lymph.Nodes.Positive", "Grade", "Size")
+head(clinical[, usefulFeatures])
+```
+
+View the distribution of censored and uncensored event times.
+
+```{r}
+invisible(by(clinical, clinical[, "eventRFS"], function(samplesByCensored)
+{
+  message("Samples in Category ", samplesByCensored[1, "eventRFS"],  " : ", nrow(samplesByCensored))
+  print(summary(samplesByCensored[, "timeRFS"]))
+}))
+```
+
+Subset to samples in common to RNA arrays, IMC and clinical data. **Note:** Some patients have two or three images. Arbitrarily pick one image per sample for those that have two or three images.
+
+```{r}
+commonIDs <- Reduce(intersect, list(clinical$metabricId, IMC$metabricId, rownames(RNAarrays)))
+clinical <- clinical[match(commonIDs, clinical$metabricId), ]
+IMC <- IMC[, colData(IMC)$metabricId %in% commonIDs]
+RNAarrays <- RNAarrays[match(commonIDs, rownames(RNAarrays)), ]
+patientIDToImgID <- by(colData(IMC), colData(IMC)$metabricId, function(patientColData)
+                    {
+                      unique(patientColData$ImageNumber)[1]
+                    })[commonIDs]
+IMC <- IMC[, colData(IMC)$ImageNumber %in% patientIDToImgID]
+```
+
+## Metafeature Generation
+
+Cell type proportions ignoring the spatial location of cells.
+
+```{r}
+library(spicyR)
+proportions <- getProp(IMC, "description", "ImageNumber")
+rownames(proportions) <- names(patientIDToImgID)[match(rownames(proportions), patientIDToImgID)]
+proportions[1:5, 1:5]
+```
+
+The row names are image numbers and the column names are cell types.
+
+Calculate statistics for colocalisation between all pairs of cell types.
+
+```{r}
+library(BiocParallel)
+pairsColocated <- getPairwise(IMC, sigma = 50, BPPARAM = MulticoreParam(16), fast = TRUE,
+                              imageID = "ImageNumber", cellType = "description",
+                              spatialCoords = c("Location_Center_X", "Location_Center_Y"))
+rownames(pairsColocated) <- names(patientIDToImgID)[match(rownames(pairsColocated), patientIDToImgID)]
+pairsColocated[1:5, 1:5]
+```
+
+Microenvironments by clustering.
+
+```{r}
+library(lisaClust)
+IMC <- lisaClust(IMC, k = 10, sigma = 50, BPPARAM = MulticoreParam(16), fast = FALSE,
+                 imageID = "ImageNumber", cellType = "description",
+                 spatialCoords = c("Location_Center_X", "Location_Center_Y"))
+regionsColocal <- getProp(IMC, feature = "region", "ImageNumber") # Extract newly-added information.
+rownames(regionsColocal) <- names(patientIDToImgID)[match(rownames(regionsColocal), patientIDToImgID)]
+regionsColocal[1:5, 1:5]
+```
+
+Average highly-variable gene expression per cell type.
+
+```{r}
+library(scFeatures)
+colData(IMC)$x_cord <- colData(IMC)$Location_Center_X
+colData(IMC)$y_cord <- colData(IMC)$Location_Center_Y
+HVGaverages <- scFeatures(IMC, feature_types = "gene_mean_celltype", type = "spatial_p",
+                  sample = colData(IMC)$ImageNumber,
+                  celltype = colData(IMC)$description,
+                  assay = "counts", ncores = 16)[["gene_mean_celltype"]]
+rownames(HVGaverages) <- names(patientIDToImgID)[match(rownames(HVGaverages), patientIDToImgID)]
+HVGaverages[1:5, 1:5]
+```
+
+Proportions relative to a parent cell type.
+
+```{r}
+library(treekoR)
+
+tree <- getClusterTree(t(assay(IMC, "counts")), colData(IMC)$description,
+                       hierarchy_method = "hopach")
+
+proportionsParent <- getCellProp(tree$clust_tree, colData(IMC)$description, colData(IMC)$metabricId,
+                                 colData(IMC)$metabricId)
+rownames(proportionsParent) <- proportionsParent$sample_id
+proportionsParent[is.na(proportionsParent)] <- 0
+proportionsParent <- proportionsParent[rownames(proportions), -c(1:2)]
+proportionsParent <- proportionsParent[, grep("parent", colnames(proportionsParent))]
+proportionsParent[1:5, 1:5]
+```
+
+## Survival Time Modelling and C-index Evaluation
+
+Create a list of all data tables.
+
+```{r}
+measurements <- list(clinical = clinical, `RNA Microarray` = RNAarrays, `Type Proportions` = proportions,
+                     `Type Protein Mean` = HVGaverages, `Type Pairs Colocated` = pairsColocated,
+                     `Colocated in Regions` = regionsColocal, `Proportion of Parent` = proportionsParent)
+sapply(measurements, dim)
+```
+
+Cox survival model for each assay individually.
+
+```{r, include = FALSE}
+library(ClassifyR)
+```
+
+```{r}
+orderAssays <- c("clinical", "Type Proportions", "RNA Microarray",
+                 "Proportion of Parent", "Colocated in Regions", "Type Protein Mean", "Type Pairs Colocated")
+coxPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = 10,
+                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
+                             selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 16)
+performancePlot(coxPredicts, orderingList = list(`Assay Name` = orderAssays)) +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + ggtitle("Concordance of Individual Assays")
+```
+
+Cox survival model for concatenation of assays.
+
+```{r}
+coxMergePredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = 10, multiViewMethod = "merge",
+                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
+                             selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 16)
+performancePlot(coxMergePredicts, orderingList = list("Assay Name" = "performanceDescending")) +
+  theme(axis.text.x = element_text(angle = 45, size = 6, vjust = 1, hjust = 1)) + ggtitle("METABRIC All Merges Comparison")
+```
+
+Cox survival model for prevalidation (concatenate each assay as one column to the clinical data).
+
+```{r}
+coxPrevalPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = 10, multiViewMethod = "prevalidation",
+                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
+                             selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 16)
+performancePlot(coxPrevalPredicts) + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
