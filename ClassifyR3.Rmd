@@ -65,8 +65,20 @@ clinical$timeRFS <- apply(clinical[, c("T", "TLR", "TDR")], 1, min)
 clinical$eventRFS <- apply(clinical[, c("DeathBreast", "LR", "DR")], 1, max)
 rownames(clinical) <- clinical[, "METABRIC.ID"]
 usefulFeatures <- c("Breast.Tumour.Laterality", "ER.Status", "Inferred.Menopausal.State",
-                    "Lymph.Nodes.Positive", "Grade", "Size")
+                    "Lymph.Nodes.Positive", "Grade", "Size", "Stage")
 head(clinical[, usefulFeatures])
+```
+
+There is a small amount of missing data in the clinical table. Impute it using random forest. There are also two genes with one sample each with a missing value in the RNA abundance table. Use mean imputation because missRanger doesn't work on such a large matrix, due to a limitation on the number of terms which can be in R's formula specification.
+
+```{r}
+set.seed(1111)
+library(missRanger)
+clinical <- missRanger(clinical, . - MATCHED.NORMAL.METABRIC.ID ~ . - METABRIC.ID - MATCHED.NORMAL.METABRIC.ID - Cohort - Date.Of.Diagnosis - Complete.Rec.History - metabricId)
+table(is.na(RNAarrays)) # Only two numbers in the entire matrix. Forest fails.
+whichMissing <- which(apply(RNAarrays, 2, anyNA))
+RNAarrays[, whichMissing] <- apply(RNAarrays[, whichMissing], 2, function(feature) 
+    feature[is.na(feature)] <- mean(feature, na.rm = TRUE))
 ```
 
 View the distribution of censored and uncensored event times.
@@ -199,9 +211,22 @@ performancePlot(coxMergePredicts, orderingList = list("Assay Name" = "performanc
 
 Cox survival model for prevalidation (concatenate each assay as one column to the clinical data).
 
-```{r}
-coxPrevalPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = 10, multiViewMethod = "prevalidation",
-                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
-                             selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 16)
+```{r, fig.width = 12}
+coxPrevalPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"),
+                     nFeatures = list(clinical = 2:5, `RNA Microarray` = c(5, 10, 20, 50)),
+                     multiViewMethod = "prevalidation", nRepeats = 20, nCores = 20,
+                     extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
+                     selectionMethod = "CoxPH", classifier = "CoxPH")
 performancePlot(coxPrevalPredicts) + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+Cox survival model for Principal Components Analysis dimensionality reduction (concatenate each principal component as one column to the clinical data).
+
+```{r, fig.width = 12}
+PCApredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"),
+               nFeatures = list(clinical = 2:5, `RNA Microarray` = c(5, 10, 20, 50)),
+               multiViewMethod = "prevalidation", nRepeats = 20, nCores = 20,
+               extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
+               selectionMethod = "CoxPH", classifier = "CoxPH")
+performancePlot(PCApredicts) + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
 ```
