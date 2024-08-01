@@ -33,6 +33,7 @@ library(SingleCellExperiment)
 ```{r}
 datasetFolder <- "/dski/nobackup/biostat/datasets/spatial/IMC_BreastCancer_metabric_Ali2020"
 IMC <- read.csv(file.path(datasetFolder, "Data", "single_cell_data.csv"))
+IMC[, "description"] <- factor(IMC[, "description"]) 
 IMC <- SingleCellExperiment(colData = DataFrame(IMC[, -(6:43)]),
                             assays = list(counts = t(IMC[, 6:43]))
                            )
@@ -122,9 +123,9 @@ Calculate statistics for colocalisation between all pairs of cell types.
 
 ```{r}
 library(BiocParallel)
-pairsColocated <- getPairwise(IMC, sigma = 50, BPPARAM = MulticoreParam(16), fast = TRUE,
+pairsColocated <- getPairwise(IMC, sigma = 50, BPPARAM = MulticoreParam(16),
                               imageID = "ImageNumber", cellType = "description",
-                              spatialCoords = c("Location_Center_X", "Location_Center_Y"))
+                              spatialCoordCols = c("Location_Center_X", "Location_Center_Y"))
 rownames(pairsColocated) <- names(patientIDToImgID)[match(rownames(pairsColocated), patientIDToImgID)]
 pairsColocated[1:5, 1:5]
 ```
@@ -133,7 +134,7 @@ Microenvironments by clustering.
 
 ```{r}
 library(lisaClust)
-IMC <- lisaClust(IMC, k = 10, sigma = 50, BPPARAM = MulticoreParam(16), fast = FALSE,
+IMC <- lisaClust(IMC, k = 10, sigma = 50, BPPARAM = MulticoreParam(16),
                  imageID = "ImageNumber", cellType = "description",
                  spatialCoords = c("Location_Center_X", "Location_Center_Y"))
 regionsColocal <- getProp(IMC, feature = "region", "ImageNumber") # Extract newly-added information.
@@ -147,10 +148,10 @@ Average highly-variable gene expression per cell type.
 library(scFeatures)
 colData(IMC)$x_cord <- colData(IMC)$Location_Center_X
 colData(IMC)$y_cord <- colData(IMC)$Location_Center_Y
-HVGaverages <- scFeatures(IMC, feature_types = "gene_mean_celltype", type = "spatial_p",
+HVGaverages <- scFeatures(assay(IMC, "counts"), feature_types = "gene_mean_celltype", type = "spatial_p",
                   sample = colData(IMC)$ImageNumber,
                   celltype = colData(IMC)$description,
-                  assay = "counts", ncores = 16)[["gene_mean_celltype"]]
+                  ncores = 16)[["gene_mean_celltype"]]
 rownames(HVGaverages) <- names(patientIDToImgID)[match(rownames(HVGaverages), patientIDToImgID)]
 HVGaverages[1:5, 1:5]
 ```
