@@ -34,8 +34,8 @@ library(SingleCellExperiment)
 datasetFolder <- "/dski/nobackup/biostat/datasets/spatial/IMC_BreastCancer_metabric_Ali2020"
 IMC <- read.csv(file.path(datasetFolder, "Data", "single_cell_data.csv"))
 IMC[, "description"] <- factor(IMC[, "description"]) 
-IMC <- SingleCellExperiment(colData = DataFrame(IMC[, -(6:43)]),
-                            assays = list(counts = t(IMC[, 6:43]))
+IMC <- SingleCellExperiment(colData = DataFrame(IMC[, -(6:44)]),
+                            assays = list(counts = t(IMC[, 6:44]))
                            )
 IMC
 ```
@@ -46,7 +46,7 @@ Import the gene expression microarrays.
 
 ```{r}
 RNAarrays <- read.delim(file.path(datasetFolder, "Data", "brca_metabric",
-                        "data_mrna_agilent_microarray_zscores_ref_all_samples.txt"),
+                        "data_mrna_agilent_microarray.txt"),
                         check.names = FALSE)
 RNAarrays[1:5, 1:5]
 RNAarrays <- RNAarrays[!duplicated(RNAarrays[, "Hugo_Symbol"]), ]
@@ -54,6 +54,8 @@ rownames(RNAarrays) <- RNAarrays[, "Hugo_Symbol"]
 RNAarrays <- RNAarrays[, -(1:2)]
 RNAarrays <- t(RNAarrays)
 RNAarrays[1:5, 1:5]
+topHVG <- order(apply(RNAarrays, 2, var), decreasing = TRUE)[1:2000]
+RNAarrays <- RNAarrays[, topHVG]
 ```
 
 There has also been updated clinical data made available for METABRIC patients with longer follow-up times. Import the data and derive the recurrence-free survival variable.
@@ -61,12 +63,16 @@ There has also been updated clinical data made available for METABRIC patients w
 ```{r}
 clinical <- read.delim(file.path(datasetFolder, "Data", "NIHMS1520488-supplement-Supp_Table_5.txt"),
                        check.names = FALSE)
+clinical <- subset(clinical, clinical$Lymph.Nodes.Positive == 0)
 clinical$metabricId <- clinical$METABRIC.ID # Column name identical for joining to omics data.
 clinical$timeRFS <- apply(clinical[, c("T", "TLR", "TDR")], 1, min)
 clinical$eventRFS <- apply(clinical[, c("DeathBreast", "LR", "DR")], 1, max)
 rownames(clinical) <- clinical[, "METABRIC.ID"]
 usefulFeatures <- c("Breast.Tumour.Laterality", "ER.Status", "Inferred.Menopausal.State",
-                    "Lymph.Nodes.Positive", "Grade", "Size", "Stage")
+                    "Grade", "Size", "Stage")
+clinical$Breast.Tumour.Laterality <- factor(clinical$Breast.Tumour.Laterality)
+clinical$ER.Status <- factor(clinical$ER.Status)
+clinical$Inferred.Menopausal.State <- factor(clinical$Inferred.Menopausal.State)
 head(clinical[, usefulFeatures])
 ```
 
@@ -75,7 +81,7 @@ There is a small amount of missing data in the clinical table. Impute it using r
 ```{r}
 set.seed(1111)
 library(missRanger)
-clinical <- missRanger(clinical, . - MATCHED.NORMAL.METABRIC.ID ~ . - METABRIC.ID - MATCHED.NORMAL.METABRIC.ID - Cohort - Date.Of.Diagnosis - Complete.Rec.History - metabricId)
+clinical <- missRanger(clinical, . - MATCHED.NORMAL.METABRIC.ID ~ . - METABRIC.ID - MATCHED.NORMAL.METABRIC.ID - Cohort - Date.Of.Diagnosis - Complete.Rec.History - metabricId, pmm.k = 5)
 table(is.na(RNAarrays)) # Only ten numbers in the entire matrix. Forest fails.
 whichMissing <- which(apply(RNAarrays, 2, anyNA))
 RNAarrays[, whichMissing] <- apply(RNAarrays[, whichMissing], 2, function(feature) 
@@ -197,9 +203,11 @@ nFeatures = list(clinical = 1:3, `RNA Microarray` = c(5, 10, 20, 50), `Type Prop
                  `Proportion of Parent` = 1:5, `Colocated in Regions` = 1:5,
                  `Type Protein Mean` = 1:5, `Type Pairs Colocated` = 1:5)
 
-coxPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = nFeatures,
-                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
-                             selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 20)
+coxPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"),
+                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures)),
+                                                select = list(tuneParams = list(nFeatures = nFeatures)),
+                                                tuneCross = list(performanceType = "auto", tuneMode = "Resubstitution")),
+                             selectionMethod = "CoxPH", classifier = "CoxPH", nCores = 20, verbose = 1)
 performancePlot(coxPredicts, orderingList = list(`Assay Name` = orderAssays)) +
     theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + ggtitle("Concordance of Individual Assays")
 ```
@@ -210,14 +218,17 @@ Evaluate the features being repeatedly chosen for the well-performing clinical d
 table(unlist(do.call(rbind, chosenFeatureNames(coxPredicts[["clinical.CoxPH.CoxPH"]]))[, "feature"]))
 ```
 
-Number of lymph nodes invaded, tumour size and stage are all frequently chosen.
+Grade, tumour size and stage are all frequently chosen.
 
 Cox survival model for concatenation of assays.
 
 ```{r, fig.width = 12}
-coxMergePredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = nFeatures, multiViewMethod = "merge",
-                             extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
-                             selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 20)
+coxMergePredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"),
+                                  extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures)),
+                                                select = list(tuneParams = list(nFeatures = nFeatures)),
+                                                tuneCross = list(performanceType = "auto", tuneMode = "Resubstitution")),
+                                  multiViewMethod = "merge",
+                                  selectionMethod = "CoxPH", classifier = "CoxPH", nRepeats = 20, nCores = 20, verbose = 1)
 performancePlot(coxMergePredicts, orderingList = list("Assay Name" = "performanceDescending")) +
   theme(axis.text.x = element_text(angle = 45, size = 6, vjust = 1, hjust = 1)) + ggtitle("METABRIC All Merges Comparison")
 ```
@@ -235,10 +246,12 @@ In addition to the clinical data, Ki67 is a repeatedly selected omics feature. A
 Cox survival model for prevalidation (concatenate each assay as one column to the clinical data).
 
 ```{r, fig.width = 12}
-coxPrevalPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"), nFeatures = nFeatures,
+coxPrevalPredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"),
+                     extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures)),
+                                                select = list(tuneParams = list(nFeatures = nFeatures)),
+                                                tuneCross = list(performanceType = "auto", tuneMode = "Resubstitution")),
                      multiViewMethod = "prevalidation", nRepeats = 20, nCores = 20,
-                     extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
-                     selectionMethod = "CoxPH", classifier = "CoxPH")
+                     selectionMethod = "CoxPH", classifier = "CoxPH", verbose = 1)
 performancePlot(coxPrevalPredicts) + ggtitle("METABRIC Prevalidation Comparison")
 ```
 
@@ -249,10 +262,11 @@ nFeatures = list(clinical = 1:3, `RNA Microarray` = 2, `Type Proportions` = 2,
                  `Proportion of Parent` = 2, `Colocated in Regions` = 2,
                  `Type Protein Mean` = 2, `Type Pairs Colocated` = 2)
 PCApredicts <- crossValidate(measurements, c("timeRFS", "eventRFS"),
-               nFeatures = nFeatures,
                multiViewMethod = "PCA", nRepeats = 20, nCores = 20,
-               extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures))),
-               selectionMethod = "CoxPH", classifier = "CoxPH")
+               extraParams = list(prepare = list(useFeatures = list(clinical = usefulFeatures)),
+                                                select = list(tuneParams = list(nFeatures = nFeatures)),
+                                                tuneCross = list(performanceType = "auto", tuneMode = "Resubstitution")),
+               selectionMethod = "CoxPH", classifier = "CoxPH", verbose = 1)
 performancePlot(PCApredicts) + ggtitle("METABRIC PCA Comparison")
 ```
 
